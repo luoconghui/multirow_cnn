@@ -5,9 +5,9 @@ import spinal.lib._
 import scala.util.Random
 
 case class peUnit(ww : Int, width : Int) extends Component{
-  val dataType = HardType(SInt(12 bits))
-  val weightType = HardType(SInt(6 bits))
-  val retType = HardType(SInt(12 bits))
+  val dataType = HardType(SInt(width bits))
+  val weightType = HardType(SInt(width bits))
+  val retType = HardType(SInt(width bits))
 
   val io = new Bundle{
     val weight = in Vec(dataType(), ww)
@@ -19,7 +19,7 @@ case class peUnit(ww : Int, width : Int) extends Component{
 
   val n = mulRes.length
   val nUp = 2^log2Up(n)
-  val inDataExtended  = Vec(SInt(18 bits), size = nUp)
+  val inDataExtended  = Vec(SInt(2*width bits), size = nUp)
   inDataExtended.foreach(_.clearAll())
   inDataExtended.allowOverride
   inDataExtended.zip(mulRes).foreach{ case (int, int1) => int := int1}
