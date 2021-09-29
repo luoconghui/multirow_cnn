@@ -70,7 +70,7 @@ case class Line2Mtrix(Iw : Int, Ww : Int, Hin : Int, Hout : Int, width : Int, K 
     FifoGroup(i).io.pop.ready := io.fmOut.ready & OutFlag
     io.fmOut.payload(i) := FifoGroup(i).io.pop.payload
   }
-  
+
   when(FifoPushRdy.andR){
     OutFlag := True
   }.elsewhen(!FifoPopVld.andR){
