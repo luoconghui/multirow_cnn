@@ -23,8 +23,11 @@ case class peUnit(ww : Int, width : Int) extends Component{
   inDataExtended.foreach(_.clearAll())
   inDataExtended.allowOverride
   inDataExtended.zip(mulRes).foreach{ case (int, int1) => int := int1}
+  val delay = log2Up(ww) + 1
+  io.result := regMulRes.reduceBalancedTree(_ + _ , (s , l) => RegNext(s)).resized
 
-  def adderTree(inData : Vec[SInt]) : Vec[SInt] = {
+ /*
+ def adderTree(inData : Vec[SInt]) : Vec[SInt] = {
     val n = inData.length
     n match {
       case 2 => Vec(inData(0) +^ inData(1))
@@ -37,8 +40,9 @@ case class peUnit(ww : Int, width : Int) extends Component{
       }
     }
   }
-  val delay = log2Up(ww)
-  io.result := adderTree(Vec(regMulRes)).head.resized
+  */
+
+  // io.result := adderTree(Vec(regMulRes)).head.resized
 
 }
 
@@ -50,6 +54,8 @@ case class peUnit(ww : Int, width : Int) extends Component{
 //  }
 //}
 
+// after verifying , the latency is log2Up(Ww) + 1
+
 object peUnit extends App{
   val simWw = 8
   val simSize = 8
@@ -58,7 +64,11 @@ object peUnit extends App{
   SimConfig.withWave.withConfig(dutConfig).compile(new peUnit(simWw, simSize)).doSim{ dut =>
     import dut.{clockDomain, io, delay}
 
-    clockDomain.forkStimulus(10)
+    clockDomain.forkStimulus(12)
+
+    io.weight.foreach(_ #= 0)
+    io.fm_data.foreach(_ #= 0)
+
     clockDomain.waitSampling(2)
 
     val inWeight = (0 until simWw).map(_ => Random.nextInt(10) - 5)
@@ -69,7 +79,8 @@ object peUnit extends App{
 
     clockDomain.waitSampling(10)
 
-    print(delay)
+    println(delay)
+    println(in_fm_data.zip(inWeight).map{ case (i , j) => i*j}.sum)
 
 
 

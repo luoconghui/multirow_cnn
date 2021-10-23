@@ -5,17 +5,22 @@ import spinal.core.sim._
 import spinal.lib._
 
 case class peArray(Iw : Int, Wh : Int, Ww : Int, width : Int) extends Component{
-  val io = new Bundle {
+  val io = new Bundle {  // Ww == Ih
     val fmMat = in Vec(Vec(SInt(width bits), Iw), Ww)
     val wgtMat = in Vec(Vec(SInt(width bits), Ww), Wh)
     val outMtx = out Vec(Vec(SInt(width bits), Iw), Wh)
   }
 
   val fmMatReshape = Vec(Vec(SInt(width bits), Ww), Iw)
+
   //reshape the fmMat
+
+  fmMatReshape := Vec(io.fmMat.transpose.map(Vec(_)))
+  /*
   for(i <- 0 until(Iw); j <- 0 until(Ww)){
     fmMatReshape(i)(j) := io.fmMat(j)(i)
   }
+   */
 
   val peMtx = List.tabulate(Wh, Iw)((i,j) => new peUnit(Ww, width))
   for(i <- 0 until(Wh); j <- 0 until(Iw)){
@@ -43,6 +48,10 @@ case class peArrayCtrl(Iw : Int, Wh : Int, Ww : Int, width : Int, Ni : Int, Hout
   }.noCombLoopCheck
   val peArrayInst = new peArray(Iw, Wh, Ww, width)
   val fifoInst = new StreamFifo(dataType = fmOutType, depth = NiNumber*HoutNumber)
+
+  /*
+   @ need to fixme
+   */
   val wgtRegGroup = List.tabulate(NiNumber, Wh, Ww)((i, j, k) => Reg(SInt(width bits))).map(_.map(_.toVec).toVec).toVec
 
   implicit class list2vec[T <: Data](list: List[T]) {def toVec = (Vec(list))}
@@ -52,40 +61,51 @@ case class peArrayCtrl(Iw : Int, Wh : Int, Ww : Int, width : Int, Ni : Int, Hout
   val NiCnt  =Counter(0 until NiNumber)
   val HoutCnt = Counter(0 until  HoutNumber)
   val CiKKCnt = Counter(0 until CiKKNumber)
+
+  // OutFlag indicate the output Matrix is ready
   val OutFlag = Reg(Bool()) init(False)
+
   val FmDataEnd = Reg(Bool()) init(False)
   val WgtDataEnd = Reg(Bool()) init(False)
+
   val ReadOver = Bool()
   val ReadNiCnt = Counter(0 until NiNumber)
   val ReadHoutCnt = Counter(0 until HoutNumber)
+
+  // LastValue is the value that read from FIFO
+  // PeResult is the PeUnit's output
   val LastValue = List.tabulate(Wh, Iw)((i, j) => Reg(SInt(width bits)))
   val LastValueDelay = List.tabulate(Wh, Iw)((i, j) => Reg(SInt(width bits)))
   val PeResult = List.tabulate(Wh, Iw)((i, j) => Reg(SInt(width bits)))
 
-  val FmInReady = Reg(Bool()) init(False)
-  val WgtInReady = Reg(Bool()) init(False)
 
+  /*
+   @Sequence alignment
+   @need to fixme
+   */
   val delayConnect = List.tabulate(Wh, Iw){(i, j) =>
     LastValueDelay(i)(j) := Delay(LastValue(i)(j), log2Up(Ww) - 2)
     fifoInst.io.push.payload(i)(j) := (LastValueDelay(i)(j) + PeResult(i)(j)).resized
     io.fmOut.payload(i)(j) := fifoInst.io.pop.payload(i)(j)
   }
 
-  //reset the counter when the fifo is empty, which indicate that the PE is about to start
+//reset the counter when the fifo is empty, which indicate that the PE is about to start
 //  when(!fifoInst.io.pop.valid){
 //    NiCnt.clear()
 //    HoutCnt.clear()
 //    CiKKCnt.clear()
 //  }
 
+  // a sub-W Matrix can be discard
   when(HoutCnt.willOverflowIfInc){NiCnt.increment()}
-
+  // complete a sub-computer
   when(NiCnt.willOverflowIfInc & HoutCnt.willOverflowIfInc){CiKKCnt.increment()}
 
   when(ReadOver & !OutFlag){
     HoutCnt.increment()
   }
 
+  // OutFlag logic
   when(NiCnt === NiNumber-1 && HoutCnt === HoutNumber-1 && CiKKCnt === CiKKNumber-1){
     OutFlag := True
   }.elsewhen(!fifoInst.io.pop.valid){
@@ -101,12 +121,26 @@ case class peArrayCtrl(Iw : Int, Wh : Int, Ww : Int, width : Int, Ni : Int, Hout
 //  }.otherwise{
 //    ReadOver:= ReadOver
 //  }
+
+  when(ReadNiCnt.willOverflow){
+    WgtDataEnd := True
+  }.elsewhen(NiCnt === NiNumber-1 && HoutCnt === HoutNumber -1){
+    WgtDataEnd := False
+  }
+
+  when(ReadHoutCnt.willOverflow){
+    FmDataEnd := True
+  }.elsewhen(NiCnt === NiNumber-1 && HoutCnt === HoutNumber -1){
+    FmDataEnd := False
+  }
+
   ReadOver := FmDataEnd & WgtDataEnd
 
   //read date from the stream interface
   val FmInFire = Bool()
   FmInFire := io.fmIn.fire
 
+  // read fm buffer data
   when(io.fmIn.fire) {
     ReadHoutCnt.increment()
     fmRegGroup(ReadHoutCnt.value).zip(io.fmIn.payload).foreach{
@@ -134,25 +168,19 @@ case class peArrayCtrl(Iw : Int, Wh : Int, Ww : Int, width : Int, Ni : Int, Hout
         case (int, int1) => int := int1
       }
     }
-
+/*
+   @ need to fixme
+ */
   when(io.weightIn.fire){
     ReadNiCnt.increment()
     wgtRegGroup(ReadNiCnt.value).zip(io.weightIn.payload).foreach{case (t, t1) =>
       t.zip(t1).foreach{ case (ints, ints1) => ints := ints1}}
   }
 
-  when(ReadNiCnt.willOverflow){
-    WgtDataEnd := True
-  }.elsewhen(NiCnt === NiNumber-1 && HoutCnt === HoutNumber -1){
-    WgtDataEnd := False
-  }
 
-  when(ReadHoutCnt.willOverflow){
-    FmDataEnd := True
-  }.elsewhen(NiCnt === NiNumber-1 && HoutCnt === HoutNumber -1){
-    FmDataEnd := False
-  }
-
+/*
+   @ need to fixme
+ */
   when((NiCnt === 0) & (!OutFlag) & !WgtDataEnd  ){
     io.weightIn.ready := True
   }.otherwise{
@@ -173,23 +201,29 @@ case class peArrayCtrl(Iw : Int, Wh : Int, Ww : Int, width : Int, Ni : Int, Hout
 
   when(!OutFlag && ReadOver){
     when(CiKKCnt.value === 0){
-      LastValue.foreach{ case (t1) => t1.foreach{
-        case (t2) => t2 := 0
-      }}
+      LastValue.foreach(_.foreach(_:= 0))
     }otherwise{
       when(fifoInst.io.pop.fire){LastValue.zip(fifoInst.io.pop.payload).foreach{
         case (ints, ints1) => ints.zip(ints1).foreach{
           case (int, int1) => int := int1
         }
-      }}
+       }
+      }
     }
-    val temp = List.tabulate(Wh, Iw)((i, j) => LastValueDelay(i)(j) := Delay(LastValue(i)(j), log2Up(Ww) - 1))
+    // val temp = List.tabulate(Wh, Iw)((i, j) => LastValueDelay(i)(j) := Delay(LastValue(i)(j), log2Up(Ww) - 1))
+    LastValueDelay.zip(LastValue).foreach{ case(rowdelay , row) => rowdelay.zip(row).foreach{
+      case(delayvalue , value) => delayvalue := Delay(value , log2Up(Ww) - 1)
+      }
+    }
+
   }
 
   fifoInst.io.pop.ready := !OutFlag && ReadOver && !(CiKKCnt.value === 0)
 
 
-  //when(Delay(!OutFlag && ReadOver, log2Up(Ww)+1,  , False ){
+  /*
+    @ need to fixme
+   */
   when(Delay(that = (!OutFlag && ReadOver), cycleCount = log2Up(Ww)+1, init = False)){
     fifoInst.io.push.valid := True
   }otherwise{
@@ -207,8 +241,7 @@ case class peArrayCtrl(Iw : Int, Wh : Int, Ww : Int, width : Int, Ni : Int, Hout
 
 }
 
-object peArrayCtrlSim  {
-  def main(args: Array[String]): Unit = {
+object peArrayCtrlSim extends App {
     val Ci = 4
     val Ki = 2
     val Hout = 12
@@ -249,5 +282,5 @@ object peArrayCtrlSim  {
       print("the number of houtnumber is: ", HoutNumber)
 
     }
-  }
+
 }
