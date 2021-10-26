@@ -79,7 +79,9 @@ object peUnit extends App{
 
     clockDomain.waitSampling(10)
 
+    println("------the delay is :")
     println(delay)
+    println("the result should be :")
     println(in_fm_data.zip(inWeight).map{ case (i , j) => i*j}.sum)
 
 

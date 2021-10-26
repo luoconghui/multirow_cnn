@@ -28,7 +28,7 @@ case class peArray(Iw : Int, Wh : Int, Ww : Int, width : Int) extends Component{
     peMtx(i)(j).io.weight := io.wgtMat(i)
     io.outMtx(i)(j) := peMtx(i)(j).io.result
   }
-
+  val peArrayDelay = peMtx(0)(0).delay
 }
 
 case class peArrayCtrl(Iw : Int, Wh : Int, Ww : Int, width : Int, Ni : Int, Hout : Int, Ci : Int, K : Int) extends Component{
@@ -40,6 +40,9 @@ case class peArrayCtrl(Iw : Int, Wh : Int, Ww : Int, width : Int, Ni : Int, Hout
   val HoutNumber = scala.math.ceil(Hout / Iw).toInt
   val CiKKNumber = scala.math.ceil(Ci*K*K / Ww).toInt
 
+  val weightGroupSize = HoutNumber
+  val fmGroupSize = HoutNumber
+
   val io = new Bundle{
     val weightIn = slave Stream(weightType)
     val fmIn = slave Stream(fmInType)
@@ -49,15 +52,15 @@ case class peArrayCtrl(Iw : Int, Wh : Int, Ww : Int, width : Int, Ni : Int, Hout
   val peArrayInst = new peArray(Iw, Wh, Ww, width)
   val fifoInst = new StreamFifo(dataType = fmOutType, depth = NiNumber*HoutNumber)
 
-  /*
-   @ need to fixme
-   */
-  val wgtRegGroup = List.tabulate(NiNumber, Wh, Ww)((i, j, k) => Reg(SInt(width bits))).map(_.map(_.toVec).toVec).toVec
+
+  // define the Reg array for read weight and fm data
+  val wgtRegGroup = List.tabulate(weightGroupSize, Wh, Ww)((i, j, k) => Reg(SInt(width bits))).map(_.map(_.toVec).toVec).toVec
 
   implicit class list2vec[T <: Data](list: List[T]) {def toVec = (Vec(list))}
 
-  val fmRegGroup = List.tabulate(HoutNumber, Ww, Iw)((i, j, k) => Reg(SInt(width bits))).map(_.map(_.toVec).toVec).toVec
+  val fmRegGroup = List.tabulate(fmGroupSize, Ww, Iw)((i, j, k) => Reg(SInt(width bits))).map(_.map(_.toVec).toVec).toVec
 
+  // indicate the computer process
   val NiCnt  =Counter(0 until NiNumber)
   val HoutCnt = Counter(0 until  HoutNumber)
   val CiKKCnt = Counter(0 until CiKKNumber)
@@ -69,32 +72,34 @@ case class peArrayCtrl(Iw : Int, Wh : Int, Ww : Int, width : Int, Ni : Int, Hout
   val WgtDataEnd = Reg(Bool()) init(False)
 
   val ReadOver = Bool()
-  val ReadNiCnt = Counter(0 until NiNumber)
-  val ReadHoutCnt = Counter(0 until HoutNumber)
+  val ReadNiCnt = Counter(0 until weightGroupSize)
+  val ReadHoutCnt = Counter(0 until fmGroupSize)
 
   // LastValue is the value that read from FIFO
   // PeResult is the PeUnit's output
   val LastValue = List.tabulate(Wh, Iw)((i, j) => Reg(SInt(width bits)))
   val LastValueDelay = List.tabulate(Wh, Iw)((i, j) => Reg(SInt(width bits)))
   val PeResult = List.tabulate(Wh, Iw)((i, j) => Reg(SInt(width bits)))
+  val LastPeResult = List.tabulate(Wh , Iw)((i , j) => Reg(SInt(width bits)))
 
 
   /*
-   @Sequence alignment
+   Sequence alignment
    @need to fixme
+   fixmed
    */
   val delayConnect = List.tabulate(Wh, Iw){(i, j) =>
-    LastValueDelay(i)(j) := Delay(LastValue(i)(j), log2Up(Ww) - 2)
+    if(peArrayInst.peArrayDelay > 2){
+    LastValueDelay(i)(j) := Delay(LastValue(i)(j), peArrayInst.peArrayDelay - 2)
     fifoInst.io.push.payload(i)(j) := (LastValueDelay(i)(j) + PeResult(i)(j)).resized
+    }
+    else{
+      LastPeResult(i)(j) := Delay(PeResult(i)(j) , 2 - peArrayInst.peArrayDelay)
+      fifoInst.io.push.payload(i)(j) := (LastValue(i)(j) + LastPeResult(i)(j)).resized
+    }
     io.fmOut.payload(i)(j) := fifoInst.io.pop.payload(i)(j)
   }
 
-//reset the counter when the fifo is empty, which indicate that the PE is about to start
-//  when(!fifoInst.io.pop.valid){
-//    NiCnt.clear()
-//    HoutCnt.clear()
-//    CiKKCnt.clear()
-//  }
 
   // a sub-W Matrix can be discard
   when(HoutCnt.willOverflowIfInc){NiCnt.increment()}
@@ -108,23 +113,17 @@ case class peArrayCtrl(Iw : Int, Wh : Int, Ww : Int, width : Int, Ni : Int, Hout
   // OutFlag logic
   when(NiCnt === NiNumber-1 && HoutCnt === HoutNumber-1 && CiKKCnt === CiKKNumber-1){
     OutFlag := True
-  }.elsewhen(!fifoInst.io.pop.valid){
+  }.elsewhen(!fifoInst.io.pop.valid){ // when vaild deassert it means fifo is empty
     OutFlag := False
   }.otherwise{
     OutFlag := OutFlag
   }
 
-//  when(NiCnt === NiNumber && HoutCnt === HoutNumber - 1){
-//    ReadOver := False
-//  }.elsewhen(ReadNiCnt === NiNumber-1 && ReadHoutCnt === HoutNumber-1){
-//    ReadOver := True
-//  }.otherwise{
-//    ReadOver:= ReadOver
-//  }
 
-  when(ReadNiCnt.willOverflow){
+  // indicate whether the W or I is readover
+  when(ReadNiCnt.willOverflow || ReadNiCnt === U(NiNumber - 1) - NiCnt){
     WgtDataEnd := True
-  }.elsewhen(NiCnt === NiNumber-1 && HoutCnt === HoutNumber -1){
+  }.elsewhen(NiCnt.valueNext % weightGroupSize === 0 && HoutCnt === HoutNumber -1){
     WgtDataEnd := False
   }
 
@@ -136,9 +135,7 @@ case class peArrayCtrl(Iw : Int, Wh : Int, Ww : Int, width : Int, Ni : Int, Hout
 
   ReadOver := FmDataEnd & WgtDataEnd
 
-  //read date from the stream interface
-  val FmInFire = Bool()
-  FmInFire := io.fmIn.fire
+  //read data from the stream interface
 
   // read fm buffer data
   when(io.fmIn.fire) {
@@ -150,6 +147,17 @@ case class peArrayCtrl(Iw : Int, Wh : Int, Ww : Int, width : Int, Ni : Int, Hout
     }
   }
 
+  // read weight buffer data
+  when(io.weightIn.fire){
+    ReadNiCnt.increment()
+    wgtRegGroup(ReadNiCnt.value).zip(io.weightIn.payload).foreach{case (t, t1) =>
+      t.zip(t1).foreach{ case (ints, ints1) => ints := ints1}}
+
+  }
+  when(NiCnt === NiNumber - 1 && HoutCnt === HoutNumber - 1) {
+    ReadNiCnt.clear()
+  }
+
     peArrayInst.io.fmMat.zip(fmRegGroup(HoutCnt.value)).foreach{
       case (t, t1) => t.zip(t1).foreach{
         case (int, int1) => int := int1
@@ -157,7 +165,8 @@ case class peArrayCtrl(Iw : Int, Wh : Int, Ww : Int, width : Int, Ni : Int, Hout
     }
 
 
-    peArrayInst.io.wgtMat.zip(wgtRegGroup(NiCnt.value)).foreach{
+
+    peArrayInst.io.wgtMat.zip(wgtRegGroup((NiCnt.value % weightGroupSize).resized)).foreach{
       case (t, t1) => t.zip(t1).foreach{
         case (int, int1) => int := int1
       }
@@ -168,20 +177,12 @@ case class peArrayCtrl(Iw : Int, Wh : Int, Ww : Int, width : Int, Ni : Int, Hout
         case (int, int1) => int := int1
       }
     }
-/*
-   @ need to fixme
- */
-  when(io.weightIn.fire){
-    ReadNiCnt.increment()
-    wgtRegGroup(ReadNiCnt.value).zip(io.weightIn.payload).foreach{case (t, t1) =>
-      t.zip(t1).foreach{ case (ints, ints1) => ints := ints1}}
-  }
-
 
 /*
    @ need to fixme
+   fixmed
  */
-  when((NiCnt === 0) & (!OutFlag) & !WgtDataEnd  ){
+  when((NiCnt % weightGroupSize === 0) & (!OutFlag) & !WgtDataEnd ){
     io.weightIn.ready := True
   }.otherwise{
     io.weightIn.ready := False
@@ -193,10 +194,7 @@ case class peArrayCtrl(Iw : Int, Wh : Int, Ww : Int, width : Int, Ni : Int, Hout
     io.fmIn.ready := False
   }
 
-  //compute the data
 
-  io.peSwitch := OutFlag
-  io.fmOut.valid := !fifoInst.io.pop.ready
 
 
   when(!OutFlag && ReadOver){
@@ -210,27 +208,36 @@ case class peArrayCtrl(Iw : Int, Wh : Int, Ww : Int, width : Int, Ni : Int, Hout
        }
       }
     }
-    // val temp = List.tabulate(Wh, Iw)((i, j) => LastValueDelay(i)(j) := Delay(LastValue(i)(j), log2Up(Ww) - 1))
-    LastValueDelay.zip(LastValue).foreach{ case(rowdelay , row) => rowdelay.zip(row).foreach{
-      case(delayvalue , value) => delayvalue := Delay(value , log2Up(Ww) - 1)
-      }
-    }
-
   }
 
-  fifoInst.io.pop.ready := !OutFlag && ReadOver && !(CiKKCnt.value === 0)
+
 
 
   /*
     @ need to fixme
+    fixmed
    */
-  when(Delay(that = (!OutFlag && ReadOver), cycleCount = log2Up(Ww)+1, init = False)){
-    fifoInst.io.push.valid := True
-  }otherwise{
-    fifoInst.io.push.valid := False
+  if(peArrayInst.peArrayDelay > 2) {
+    when(Delay(!OutFlag && ReadOver, cycleCount = peArrayInst.peArrayDelay + 1, init = False)) {
+      fifoInst.io.push.valid := True
+    } otherwise {
+      fifoInst.io.push.valid := False
+    }
+  }
+  else{
+    when(Delay(!OutFlag && ReadOver, cycleCount = 3, init = False)) {
+      fifoInst.io.push.valid := True
+    } otherwise {
+      fifoInst.io.push.valid := False
+    }
   }
 
   //Data Out Logic
+  io.peSwitch := OutFlag
+  fifoInst.io.pop.ready := !OutFlag && ReadOver && !(CiKKCnt.value === 0)
+  io.fmOut.valid := !fifoInst.io.pop.ready
+
+
   when(OutFlag){
     io.fmOut.valid := fifoInst.io.pop.valid
     fifoInst.io.pop.ready := io.fmOut.ready
@@ -242,45 +249,63 @@ case class peArrayCtrl(Iw : Int, Wh : Int, Ww : Int, width : Int, Ni : Int, Hout
 }
 
 object peArrayCtrlSim extends App {
-    val Ci = 4
+    val Ci = 8
     val Ki = 2
     val Hout = 12
-    val Ni = 8
+    val Ni = 20
     val Wh = 2
     val Ww = 8
     val Iw = 3
     val width = 8
     val dutConfig = SpinalConfig(defaultClockDomainFrequency = FixedFrequency(100 MHz))
 
-    SimConfig.withWave.withConfig(dutConfig).compile(new peArrayCtrl(Iw, Wh, Ww, width, Ni, Hout, Ci, Ki) {
-      io.fmOut.simPublic()
-      io.fmIn.simPublic()
-      io.weightIn.simPublic()
-    }).doSim { dut =>
+    SimConfig.withWave.withConfig(dutConfig).compile(new peArrayCtrl(Iw, Wh, Ww, width, Ni, Hout, Ci, Ki)).doSim { dut =>
 
-      import dut.{clockDomain, io, NiNumber, HoutNumber}
-      clockDomain.forkStimulus(10)
+      import dut.{clockDomain, io, NiNumber, HoutNumber , CiKKNumber , fmGroupSize , weightGroupSize}
+      clockDomain.forkStimulus(100)
 
       io.fmOut.ready #= true
       io.fmIn.valid #= true
       io.weightIn.valid #= true
 
+      println("----------------------print informations for debug-----------------------------")
+      println(s"the number of CiKKnumber is: $CiKKNumber ")
+      println(s"the number of Ninumber is: $NiNumber")
+      println(s"the number of Houtnumber is: $HoutNumber")
+      println(s"the number of fmGroupSize is: $fmGroupSize" )
+      println(s"the number of weightGroupSize is: $weightGroupSize")
 
       var testData = 1
-      for(a <- 0 until(1000)){
-        if(io.fmIn.ready.toBoolean){
-          testData = (testData + 1)%100
+      for(a <- 0 until 1000){
+        if(io.weightIn.ready.toBoolean){
+          testData = (testData + 1) % 100
+          // for debug
+          val fmArrayForPrint = List.tabulate(Ww , Iw)((i , j) => testData)
+          val weightArrayForPrint = List.tabulate(Wh , Ww)((i , j) => testData)
+          println("------ this cycle's inputfmMatrix is :")
+          fmArrayForPrint.map(_.mkString(",")).foreach(println(_))
+          println("------ this cycle's inputweightMatrix is :")
+          weightArrayForPrint.map(_.mkString(",")).foreach(println(_))
         }
+        else {
+          println("------ this cycle's fmIn.ready is False")
+        }
+
         val FmPayloadConnect = List.tabulate(Ww, Iw)((i, j) => io.fmIn.payload(i)(j) #= testData)
         val WeightPayloadConnect = List.tabulate(Wh, Ww)((i, j) => io.weightIn.payload(i)(j) #= testData)
+
+
         clockDomain.waitSampling()
-      }
+        }
+
+
 
 //      clockDomain.waitSampling(1000)
 
-      print("the number of ninumber is: ", NiNumber)
-      print("the number of houtnumber is: ", HoutNumber)
 
+
+
+      println("-------------------------------------------------------------------------------")
     }
 
 }
