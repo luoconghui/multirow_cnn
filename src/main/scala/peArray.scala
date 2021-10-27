@@ -40,7 +40,7 @@ case class peArrayCtrl(Iw : Int, Wh : Int, Ww : Int, width : Int, Ni : Int, Hout
   val HoutNumber = scala.math.ceil(Hout / Iw).toInt
   val CiKKNumber = scala.math.ceil(Ci*K*K / Ww).toInt
 
-  val weightGroupSize = HoutNumber
+  val weightGroupSize = HoutNumber - 1
   val fmGroupSize = HoutNumber
 
   val io = new Bundle{
@@ -78,9 +78,9 @@ case class peArrayCtrl(Iw : Int, Wh : Int, Ww : Int, width : Int, Ni : Int, Hout
   // LastValue is the value that read from FIFO
   // PeResult is the PeUnit's output
   val LastValue = List.tabulate(Wh, Iw)((i, j) => Reg(SInt(width bits)))
-  val LastValueDelay = List.tabulate(Wh, Iw)((i, j) => Reg(SInt(width bits)))
+  val LastValueDelay = List.tabulate(Wh, Iw)((i, j) => SInt(width bits))
   val PeResult = List.tabulate(Wh, Iw)((i, j) => Reg(SInt(width bits)))
-  val LastPeResult = List.tabulate(Wh , Iw)((i , j) => Reg(SInt(width bits)))
+  val PeResultDelay = List.tabulate(Wh , Iw)((i , j) => SInt(width bits))
 
 
   /*
@@ -88,15 +88,36 @@ case class peArrayCtrl(Iw : Int, Wh : Int, Ww : Int, width : Int, Ni : Int, Hout
    @need to fixme
    fixmed
    */
+
+  // the fifo read delay is 1 cycle
+
+  /*
+  val delayNumber = peArrayInst.peArrayDelay match {
+    case 1  => 1
+    case _ => peArrayInst.peArrayDelay
+  }
+
+
+
+  val delayObject = peArrayInst.peArrayDelay match {
+    case 1 => PeResult  // also can be LastValue
+    case _ => LastValue
+  }
+
+  val objectDelay = peArrayInst.peArrayDelay match {
+    case 1 => PeResultDelay
+    case _ => LastValueDelay
+  }
+
+  val noDelayObject = peArrayInst.peArrayDelay match {
+    case 1 => LastValue
+    case _ => PeResult
+  }
+   */
+
   val delayConnect = List.tabulate(Wh, Iw){(i, j) =>
-    if(peArrayInst.peArrayDelay > 2){
-    LastValueDelay(i)(j) := Delay(LastValue(i)(j), peArrayInst.peArrayDelay - 2)
+    LastValueDelay(i)(j) := Delay(LastValue(i)(j), peArrayInst.peArrayDelay)
     fifoInst.io.push.payload(i)(j) := (LastValueDelay(i)(j) + PeResult(i)(j)).resized
-    }
-    else{
-      LastPeResult(i)(j) := Delay(PeResult(i)(j) , 2 - peArrayInst.peArrayDelay)
-      fifoInst.io.push.payload(i)(j) := (LastValue(i)(j) + LastPeResult(i)(j)).resized
-    }
     io.fmOut.payload(i)(j) := fifoInst.io.pop.payload(i)(j)
   }
 
@@ -217,32 +238,27 @@ case class peArrayCtrl(Iw : Int, Wh : Int, Ww : Int, width : Int, Ni : Int, Hout
     @ need to fixme
     fixmed
    */
-  if(peArrayInst.peArrayDelay > 2) {
-    when(Delay(!OutFlag && ReadOver, cycleCount = peArrayInst.peArrayDelay + 1, init = False)) {
+  val fifoValidDelayNumber = peArrayInst.peArrayDelay match {
+    case 1 => 2
+    case _ => peArrayInst.peArrayDelay + 1
+  }
+
+    when(Delay(!OutFlag && ReadOver, cycleCount = fifoValidDelayNumber, init = False)) {
       fifoInst.io.push.valid := True
     } otherwise {
       fifoInst.io.push.valid := False
     }
-  }
-  else{
-    when(Delay(!OutFlag && ReadOver, cycleCount = 3, init = False)) {
-      fifoInst.io.push.valid := True
-    } otherwise {
-      fifoInst.io.push.valid := False
-    }
-  }
+
 
   //Data Out Logic
   io.peSwitch := OutFlag
-  fifoInst.io.pop.ready := !OutFlag && ReadOver && !(CiKKCnt.value === 0)
-  io.fmOut.valid := !fifoInst.io.pop.ready
-
 
   when(OutFlag){
     io.fmOut.valid := fifoInst.io.pop.valid
     fifoInst.io.pop.ready := io.fmOut.ready
   }otherwise{
     io.fmOut.valid := False
+    fifoInst.io.pop.ready := !OutFlag && ReadOver && !(CiKKCnt.value === 0)
   }
 
 
@@ -254,31 +270,35 @@ object peArrayCtrlSim extends App {
     val Hout = 12
     val Ni = 20
     val Wh = 2
-    val Ww = 8
+    val Ww = 1
     val Iw = 3
     val width = 8
     val dutConfig = SpinalConfig(defaultClockDomainFrequency = FixedFrequency(100 MHz))
 
     SimConfig.withWave.withConfig(dutConfig).compile(new peArrayCtrl(Iw, Wh, Ww, width, Ni, Hout, Ci, Ki)).doSim { dut =>
 
-      import dut.{clockDomain, io, NiNumber, HoutNumber , CiKKNumber , fmGroupSize , weightGroupSize}
-      clockDomain.forkStimulus(100)
+      import dut.{clockDomain, io, NiNumber, HoutNumber , CiKKNumber , fmGroupSize , weightGroupSize ,peArrayInst}
+      clockDomain.forkStimulus(1000)
 
       io.fmOut.ready #= true
       io.fmIn.valid #= true
       io.weightIn.valid #= true
 
       println("----------------------print informations for debug-----------------------------")
+
+
+
+      var testData = 1
       println(s"the number of CiKKnumber is: $CiKKNumber ")
       println(s"the number of Ninumber is: $NiNumber")
       println(s"the number of Houtnumber is: $HoutNumber")
       println(s"the number of fmGroupSize is: $fmGroupSize" )
       println(s"the number of weightGroupSize is: $weightGroupSize")
 
-      var testData = 1
-      for(a <- 0 until 1000){
+      for(a <- 0 until 10000){
         if(io.weightIn.ready.toBoolean){
-          testData = (testData + 1) % 100
+          import scala.util.Random
+          testData = Random.nextInt(4) + 1
           // for debug
           val fmArrayForPrint = List.tabulate(Ww , Iw)((i , j) => testData)
           val weightArrayForPrint = List.tabulate(Wh , Ww)((i , j) => testData)
@@ -294,8 +314,8 @@ object peArrayCtrlSim extends App {
         val FmPayloadConnect = List.tabulate(Ww, Iw)((i, j) => io.fmIn.payload(i)(j) #= testData)
         val WeightPayloadConnect = List.tabulate(Wh, Ww)((i, j) => io.weightIn.payload(i)(j) #= testData)
 
-
         clockDomain.waitSampling()
+
         }
 
 
